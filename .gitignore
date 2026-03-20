@@ -1,0 +1,6 @@
+/target
+logs/
+logs*
+*.log
+*.idea/
+.vscode/
