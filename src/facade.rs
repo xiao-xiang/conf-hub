@@ -10,6 +10,12 @@ use std::sync::Arc;
 pub trait ConfigBind: DeserializeOwned + Send + Sync + 'static {
     // PATH is like the prefix in Spring Boot
     const PATH: Option<&'static str> = None;
+
+    // A factory method for type-erased deserialization
+    fn deserialize_any(val: &serde_json::Value) -> Result<Arc<dyn std::any::Any + Send + Sync>, ConfigError> {
+        let typed: Self = serde_json::from_value(val.clone()).map_err(ConfigError::Json)?;
+        Ok(Arc::new(typed))
+    }
 }
 
 pub struct ConfigEngineBuilder {
@@ -82,10 +88,11 @@ impl ConfigEngine {
             subtree: SubtreeKey {
                 path: T::PATH.map(|s| s.to_string()),
             },
+            deserializer: <T as ConfigBind>::deserialize_any,
         };
 
-        // Initial load
-        let initial_val: Arc<T> = self.compute_typed::<T>(&key)?;
+        // Initial load using tcx query system to leverage cache and graph!
+        let initial_val: Arc<T> = self.tcx.typed_config::<T>(key.clone())?;
         let arc_swap = Arc::new(ArcSwap::new(initial_val));
 
         // Register updater for future reloads
@@ -94,16 +101,9 @@ impl ConfigEngine {
         
         let updater = Box::new(move |tcx: &CfgCtxt| -> Result<(), ConfigError> {
             if let Some(swap) = weak_swap.upgrade() {
-                // To do this via tcx query:
-                // let new_val = tcx.typed_config::<T>(key_clone.clone())?;
-                // But since we need to know the type T to deserialize, we can just call compute_typed directly.
-                // Or better, use the tcx to get the subtree and deserialize here.
-                
-                let value_map = tcx.subtree(key_clone.subtree.clone())?;
-                let typed: T = serde_json::from_value(value_map.as_ref().clone())
-                    .map_err(ConfigError::Json)?;
-                
-                swap.store(Arc::new(typed));
+                // Now using the proper query system to get typed config
+                let new_val = tcx.typed_config::<T>(key_clone.clone())?;
+                swap.store(new_val);
                 Ok(())
             } else {
                 // If the arc_swap is dropped, we can ignore
@@ -114,14 +114,6 @@ impl ConfigEngine {
         self.updaters.write().unwrap().push(updater);
 
         Ok(arc_swap)
-    }
-
-    // A helper to compute typed config (acts like the typed_config provider but with known T)
-    fn compute_typed<T: ConfigBind>(&self, key: &TypedNodeKey) -> Result<Arc<T>, ConfigError> {
-        let value_map = self.tcx.subtree(key.subtree.clone())?;
-        let typed: T = serde_json::from_value(value_map.as_ref().clone())
-            .map_err(ConfigError::Json)?;
-        Ok(Arc::new(typed))
     }
 
     /// Triggered by a background worker when e.g. Nacos updates

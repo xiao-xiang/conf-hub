@@ -1,5 +1,8 @@
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+use crate::error::ConfigError;
+use serde_json::Value as ValueMap;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct RawItemKey {
@@ -22,11 +25,23 @@ pub struct SubtreeKey {
     pub path: Option<String>,
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Clone)]
 pub struct TypedNodeKey {
     pub type_id: TypeId,
     pub type_name: &'static str,
     pub subtree: SubtreeKey,
+    // The type-erased factory method
+    pub deserializer: fn(&ValueMap) -> Result<Arc<dyn Any + Send + Sync>, ConfigError>,
+}
+
+impl std::fmt::Debug for TypedNodeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedNodeKey")
+            .field("type_id", &self.type_id)
+            .field("type_name", &self.type_name)
+            .field("subtree", &self.subtree)
+            .finish()
+    }
 }
 
 impl Hash for TypedNodeKey {
@@ -41,3 +56,5 @@ impl PartialEq for TypedNodeKey {
         self.type_id == other.type_id && self.subtree == other.subtree
     }
 }
+
+impl Eq for TypedNodeKey {}

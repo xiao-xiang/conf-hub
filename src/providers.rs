@@ -18,9 +18,6 @@ pub struct CfgProviders {
     pub resolved_global: fn(&CfgCtxt) -> Result<Arc<ValueMap>, ConfigError>,
     pub subtree: fn(&CfgCtxt, SubtreeKey) -> Result<Arc<ValueMap>, ConfigError>,
     pub typed_config: fn(&CfgCtxt, TypedNodeKey) -> Result<Arc<dyn Any + Send + Sync>, ConfigError>,
-    
-    // Extensibility for custom deserialization logic
-    pub deserializer: fn(&ValueMap, &TypedNodeKey) -> Result<Arc<dyn Any + Send + Sync>, ConfigError>,
 }
 
 impl Default for CfgProviders {
@@ -32,7 +29,6 @@ impl Default for CfgProviders {
             resolved_global: default_resolved_global,
             subtree: default_subtree,
             typed_config: default_typed_config,
-            deserializer: |_, _| Err(ConfigError::Provider("Deserializer not configured for type".into())),
         }
     }
 }
@@ -335,5 +331,5 @@ fn default_subtree(tcx: &CfgCtxt, key: SubtreeKey) -> Result<Arc<ValueMap>, Conf
 
 fn default_typed_config(tcx: &CfgCtxt, key: TypedNodeKey) -> Result<Arc<dyn Any + Send + Sync>, ConfigError> {
     let value_map = tcx.subtree(key.subtree.clone())?;
-    (tcx.providers.deserializer)(&value_map, &key)
+    (key.deserializer)(&value_map)
 }
