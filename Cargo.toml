@@ -1,0 +1,16 @@
+[package]
+name = "confhub"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arc-swap = "1.8.2"
+java-properties = "2.0.0"
+lazy_static = "1.5.0"
+regex = "1.12.3"
+rust-ini = "0.21.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serde_yaml = "0.9.34"
+thiserror = "2.0.18"
+toml = "1.0.7"
