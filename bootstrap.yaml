@@ -1,0 +1,51 @@
+app:
+    name: "order-server"
+    profile: "dev"
+
+log:
+    level: "info"
+    dir: "logs"
+    file_name: "app.log"
+    max_size: 104857600
+    max_backups: 10
+    max_age: 7
+    compress: true
+    console: true
+
+config:
+    sources:
+        app_config:
+            type: "layered"
+            sources:
+                - type: "nacos"
+                  server_addr: "172.30.97.58:8848"
+                  username: "develop"
+                  password: "develop2024."
+                  namespace: "pxb7_dev"
+                  configs:
+                      - data_id: "promotion-c-dynamic2.yaml"
+                        group: "DEFAULT_GROUP"
+                        dynamic: true
+                        file_extension: "yaml"
+                      - data_id: "promotion-c-dynamic3.yaml"
+                        group: "DEFAULT_GROUP"
+                        dynamic: true
+                        file_extension: "yaml"
+                - type: "env"
+                - type: "args"
+                  prefix: "--app_config."
+
+        server_config:
+            type: "layered"
+            sources:
+                - type: "file"
+                  files:
+                      - path: "server.toml"
+                - type: "env"
+                - type: "args"
+                  prefix: "--server_config."
+
+        test_config:
+            type: "layered"
+            sources:
+                - type: "env"
