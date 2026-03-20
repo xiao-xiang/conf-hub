@@ -1,6 +1,6 @@
 use crate::context::CfgCtxt;
 use crate::error::ConfigError;
-use crate::keys::{SubtreeKey, TypedNodeKey, RawItemKey, SourceKey};
+use crate::keys::{SubtreeKey, TypedNodeKey, RawItemKey};
 use crate::providers::CfgProviders;
 use arc_swap::ArcSwap;
 use serde::de::DeserializeOwned;
@@ -8,13 +8,13 @@ use std::any::TypeId;
 use std::sync::Arc;
 
 pub trait ConfigBind: DeserializeOwned + Send + Sync + 'static {
-    const SOURCE: &'static str;
+    // PATH is like the prefix in Spring Boot
     const PATH: Option<&'static str> = None;
 }
 
 pub struct ConfigEngineBuilder {
     providers: CfgProviders,
-    sources: std::collections::HashMap<SourceKey, Vec<RawItemKey>>,
+    global_sources: Vec<RawItemKey>,
     raw_store: std::collections::HashMap<RawItemKey, String>,
 }
 
@@ -22,13 +22,13 @@ impl ConfigEngineBuilder {
     pub fn new() -> Self {
         Self {
             providers: CfgProviders::default(),
-            sources: std::collections::HashMap::new(),
+            global_sources: Vec::new(),
             raw_store: std::collections::HashMap::new(),
         }
     }
 
-    pub fn register_source(mut self, source: &str, items: Vec<RawItemKey>) -> Self {
-        self.sources.insert(source.to_string(), items);
+    pub fn with_global_sources(mut self, sources: Vec<RawItemKey>) -> Self {
+        self.global_sources = sources;
         self
     }
 
@@ -41,8 +41,8 @@ impl ConfigEngineBuilder {
         let tcx = Arc::new(CfgCtxt::new(self.providers));
         
         {
-            let mut registry = tcx.source_registry.write().unwrap();
-            *registry = self.sources;
+            let mut registry = tcx.global_sources.write().unwrap();
+            *registry = self.global_sources;
         }
         
         {
@@ -80,7 +80,6 @@ impl ConfigEngine {
             type_id: TypeId::of::<T>(),
             type_name: std::any::type_name::<T>(),
             subtree: SubtreeKey {
-                source: T::SOURCE.to_string(),
                 path: T::PATH.map(|s| s.to_string()),
             },
         };

@@ -2,3 +2,5 @@
 grpc_port = 50051
 http_port = 8080
 rabbitmq_url = "amqp://licong:18258453478lc@www.soyue.top:5672/%2f"
+
+test_test = "${a.age}"

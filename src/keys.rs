@@ -1,43 +1,24 @@
 use std::any::TypeId;
 use std::hash::{Hash, Hasher};
 
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-pub enum Format {
-    Yaml,
-    Toml,
-    Json,
-    Ini,
-    Properties,
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub enum RawItemKey {
-    File(String, Format),
-    Nacos {
-        group: String,
-        data_id: String,
-        format: Format,
-    },
-    Env(String), // Prefix
-    Args,
+pub struct RawItemKey {
+    pub uri: String,
+    pub parser_type: String,
 }
 
 impl RawItemKey {
-    pub fn format(&self) -> Option<Format> {
-        match self {
-            RawItemKey::File(_, fmt) => Some(*fmt),
-            RawItemKey::Nacos { format, .. } => Some(*format),
-            RawItemKey::Env(_) => None,
-            RawItemKey::Args => None,
+    pub fn new(uri: impl Into<String>, parser_type: impl Into<String>) -> Self {
+        Self {
+            uri: uri.into(),
+            parser_type: parser_type.into(),
         }
     }
 }
 
-pub type SourceKey = String;
-
+// SubtreeKey no longer needs a SourceKey because it always refers to the global tree
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct SubtreeKey {
-    pub source: SourceKey,
     pub path: Option<String>,
 }
 

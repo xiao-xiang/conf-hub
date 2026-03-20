@@ -1,6 +1,6 @@
 use crate::context::CfgCtxt;
 use crate::error::ConfigError;
-use crate::keys::{Format, RawItemKey, SourceKey, SubtreeKey, TypedNodeKey};
+use crate::keys::{RawItemKey, SubtreeKey, TypedNodeKey};
 use serde_json::Value as ValueMap;
 use std::any::Any;
 use std::fs;
@@ -14,8 +14,8 @@ use lazy_static::lazy_static;
 pub struct CfgProviders {
     pub raw_item: fn(&CfgCtxt, RawItemKey) -> Result<Arc<String>, ConfigError>,
     pub parsed_item: fn(&CfgCtxt, RawItemKey) -> Result<Arc<ValueMap>, ConfigError>,
-    pub merged_source: fn(&CfgCtxt, SourceKey) -> Result<Arc<ValueMap>, ConfigError>,
-    pub resolved_source: fn(&CfgCtxt, SourceKey) -> Result<Arc<ValueMap>, ConfigError>,
+    pub merged_global: fn(&CfgCtxt) -> Result<Arc<ValueMap>, ConfigError>,
+    pub resolved_global: fn(&CfgCtxt) -> Result<Arc<ValueMap>, ConfigError>,
     pub subtree: fn(&CfgCtxt, SubtreeKey) -> Result<Arc<ValueMap>, ConfigError>,
     pub typed_config: fn(&CfgCtxt, TypedNodeKey) -> Result<Arc<dyn Any + Send + Sync>, ConfigError>,
     
@@ -28,8 +28,8 @@ impl Default for CfgProviders {
         Self {
             raw_item: default_raw_item,
             parsed_item: default_parsed_item,
-            merged_source: default_merged_source,
-            resolved_source: default_resolved_source,
+            merged_global: default_merged_global,
+            resolved_global: default_resolved_global,
             subtree: default_subtree,
             typed_config: default_typed_config,
             deserializer: |_, _| Err(ConfigError::Provider("Deserializer not configured for type".into())),
@@ -38,20 +38,19 @@ impl Default for CfgProviders {
 }
 
 fn default_raw_item(tcx: &CfgCtxt, key: RawItemKey) -> Result<Arc<String>, ConfigError> {
-    match key {
-        RawItemKey::File(ref path, _) => {
-            let content = fs::read_to_string(path).map_err(ConfigError::Io)?;
-            Ok(Arc::new(content))
-        }
-        RawItemKey::Nacos { .. } | RawItemKey::Env(_) | RawItemKey::Args => {
-            // Read from dynamic raw store
-            let store = tcx.raw_store.read().unwrap();
-            if let Some(content) = store.get(&key) {
-                Ok(Arc::new(content.clone()))
-            } else {
-                Ok(Arc::new(String::new())) // Return empty string if not found/initialized
-            }
-        }
+    // If it's a file, read from disk
+    if key.uri.starts_with("file://") {
+        let path = key.uri.trim_start_matches("file://");
+        let content = fs::read_to_string(path).map_err(ConfigError::Io)?;
+        return Ok(Arc::new(content));
+    }
+    
+    // Otherwise, check raw store (dynamic sources like Nacos, Env, Args)
+    let store = tcx.raw_store.read().unwrap();
+    if let Some(content) = store.get(&key) {
+        Ok(Arc::new(content.clone()))
+    } else {
+        Ok(Arc::new(String::new()))
     }
 }
 
@@ -156,18 +155,15 @@ fn parse_properties(text: &str) -> Result<ValueMap, ConfigError> {
     Ok(root)
 }
 
-fn parse_env(text: &str, prefix: &str) -> ValueMap {
+fn parse_env(text: &str) -> ValueMap {
     let mut root = ValueMap::Object(serde_json::Map::new());
     if let Ok(env_map) = serde_json::from_str::<HashMap<String, String>>(text) {
         for (k, v) in env_map {
-            if k.starts_with(prefix) {
-                let key_without_prefix = &k[prefix.len()..];
-                let path = key_without_prefix.replace("__", ".").to_lowercase();
-                root = insert_nested(root, &path, &v);
-            } else {
-                // If prefix is not matched exactly but maybe we just want to match it directly
-                // (e.g. for testing)
-            }
+            // For env_kv, we don't know the prefix here unless passed,
+            // but in the new design the prefix filtering should be done by the connector!
+            // The EnvConnector should only pass the filtered and prefix-stripped map here.
+            let path = k.to_lowercase().replace("__", ".");
+            root = insert_nested(root, &path, &v);
         }
     }
     root
@@ -197,54 +193,41 @@ fn default_parsed_item(tcx: &CfgCtxt, key: RawItemKey) -> Result<Arc<ValueMap>, 
         return Ok(Arc::new(serde_json::Value::Object(serde_json::Map::new())));
     }
     
-        let parsed_value = match key.format() {
-        Some(Format::Yaml) => serde_yaml::from_str(&raw_text).map_err(ConfigError::Yaml)?,
-        Some(Format::Toml) => toml::from_str(&raw_text).map_err(ConfigError::Toml)?,
-        Some(Format::Json) => serde_json::from_str(&raw_text).map_err(ConfigError::Json)?,
-        Some(Format::Ini) => parse_ini(&raw_text)?,
-        Some(Format::Properties) => parse_properties(&raw_text)?,
-        None => match key {
-            RawItemKey::Env(ref prefix) => parse_env(&raw_text, prefix),
-            RawItemKey::Args => parse_args(&raw_text),
-            _ => serde_json::Value::Null,
-        },
+    let parsed_value = match key.parser_type.as_str() {
+        "yaml" => serde_yaml::from_str(&raw_text).map_err(ConfigError::Yaml)?,
+        "toml" => toml::from_str(&raw_text).map_err(ConfigError::Toml)?,
+        "json" => serde_json::from_str(&raw_text).map_err(ConfigError::Json)?,
+        "ini" => parse_ini(&raw_text)?,
+        "properties" => parse_properties(&raw_text)?,
+        "env_kv" => parse_env(&raw_text),
+        "args_kv" => parse_args(&raw_text),
+        _ => serde_json::Value::Null,
     };
-    
-    // Convert root scalars to properly keyed map based on something? No, a file shouldn't be a root scalar usually, 
-    // but Ini parsed as `8080` if it's not well formed maybe? 
-    // Ah, `app.ini` contains "port=8080". `parse_ini` makes it `{"port": 8080}`.
-    // Why did `println!("Ini Map")` output `Number(8080)`?
-    // Let's check `parse_ini`.
     
     Ok(Arc::new(parsed_value))
 }
 
-fn default_merged_source(tcx: &CfgCtxt, key: SourceKey) -> Result<Arc<ValueMap>, ConfigError> {
+fn default_merged_global(tcx: &CfgCtxt) -> Result<Arc<ValueMap>, ConfigError> {
     let mut merged = ValueMap::Object(serde_json::Map::new());
     
-    // Get the registered raw items for this source
-    let registry = tcx.source_registry.read().unwrap();
-    if let Some(raw_items) = registry.get(&key) {
-        for raw_key in raw_items {
-            if let Ok(parsed) = tcx.parsed_item(raw_key.clone()) {
-                if parsed.is_object() {
-                    deep_merge_values(&mut merged, &parsed);
-                } else if parsed.is_null() {
-                    // Do nothing
-                } else {
-                    // It shouldn't be a scalar for a whole source, but if it is, maybe we can wrap it.
-                    // Wait, args/env map parsed as scalars when path parsing goes wrong?
-                    // Ah, `insert_nested` has a bug where if `parts.len() == 1`, it returns a scalar instead of wrapping it in an object!
-                }
-            }
+    // Get the flat list of global sources
+    let global_sources = tcx.global_sources.read().unwrap();
+    for raw_key in global_sources.iter() {
+        let parsed = tcx.parsed_item(raw_key.clone())?;
+        if parsed.is_object() {
+            deep_merge_values(&mut merged, &parsed);
+        } else if parsed.is_null() {
+            // Do nothing
+        } else {
+            // It shouldn't be a scalar for a whole source, but if it is, maybe we can wrap it.
         }
     }
     
     Ok(Arc::new(merged))
 }
 
-fn default_resolved_source(tcx: &CfgCtxt, key: SourceKey) -> Result<Arc<ValueMap>, ConfigError> {
-    let merged = tcx.merged_source(key)?;
+fn default_resolved_global(tcx: &CfgCtxt) -> Result<Arc<ValueMap>, ConfigError> {
+    let merged = tcx.merged_global()?;
     
     // Perform placeholder interpolation
     let mut resolved = (*merged).clone();
@@ -254,7 +237,10 @@ fn default_resolved_source(tcx: &CfgCtxt, key: SourceKey) -> Result<Arc<ValueMap
         static ref RE: Regex = Regex::new(r"\$\{([^}]+)\}").unwrap();
     }
     
-    fn resolve_value(val: &mut ValueMap, root: &ValueMap) {
+    fn resolve_value(val: &mut ValueMap, root: &ValueMap, depth: usize) {
+        if depth > 10 {
+            return; // Prevent infinite recursion
+        }
         match val {
             ValueMap::String(s) => {
                 if let Some(caps) = RE.captures(s) {
@@ -263,7 +249,10 @@ fn default_resolved_source(tcx: &CfgCtxt, key: SourceKey) -> Result<Arc<ValueMap
                     // If the entire string is just one placeholder, we can replace it with the exact value (number, bool, etc.)
                     if s.trim() == format!("${{{}}}", path) {
                         if let Some(replacement) = get_by_path(root, path) {
-                            *val = replacement.clone();
+                            let mut new_val = replacement.clone();
+                            // Recursively resolve the replacement
+                            resolve_value(&mut new_val, root, depth + 1);
+                            *val = new_val;
                             return;
                         }
                     }
@@ -273,24 +262,38 @@ fn default_resolved_source(tcx: &CfgCtxt, key: SourceKey) -> Result<Arc<ValueMap
                     for cap in RE.captures_iter(s) {
                         let p = cap.get(1).unwrap().as_str();
                         if let Some(replacement) = get_by_path(root, p) {
-                            let replacement_str = match replacement {
-                                ValueMap::String(rs) => rs.clone(),
+                            // Recursively resolve the replacement string before replacing
+                            let mut rep_clone = replacement.clone();
+                            resolve_value(&mut rep_clone, root, depth + 1);
+                            
+                            let replacement_str = match rep_clone {
+                                ValueMap::String(rs) => rs,
                                 other => other.to_string(),
                             };
                             new_s = new_s.replace(&format!("${{{}}}", p), &replacement_str);
                         }
                     }
-                    *val = ValueMap::String(new_s);
+                    
+                    // After string replacement, the new string might still contain placeholders
+                    // (e.g. if a placeholder evaluated to another string with placeholders).
+                    // We can recursively resolve it.
+                    let mut final_val = ValueMap::String(new_s);
+                    if let ValueMap::String(ref final_s) = final_val {
+                        if RE.is_match(final_s) {
+                            resolve_value(&mut final_val, root, depth + 1);
+                        }
+                    }
+                    *val = final_val;
                 }
             }
             ValueMap::Array(arr) => {
                 for item in arr {
-                    resolve_value(item, root);
+                    resolve_value(item, root, depth);
                 }
             }
             ValueMap::Object(obj) => {
                 for (_, v) in obj {
-                    resolve_value(v, root);
+                    resolve_value(v, root, depth);
                 }
             }
             _ => {}
@@ -299,7 +302,7 @@ fn default_resolved_source(tcx: &CfgCtxt, key: SourceKey) -> Result<Arc<ValueMap
     
     // We need a clone of the root to look up against while mutating
     let root_clone = resolved.clone();
-    resolve_value(&mut resolved, &root_clone);
+    resolve_value(&mut resolved, &root_clone, 0);
     
     Ok(Arc::new(resolved))
 }
@@ -317,7 +320,7 @@ fn get_by_path<'a>(root: &'a ValueMap, path: &str) -> Option<&'a ValueMap> {
 }
 
 fn default_subtree(tcx: &CfgCtxt, key: SubtreeKey) -> Result<Arc<ValueMap>, ConfigError> {
-    let resolved = tcx.resolved_source(key.source.clone())?;
+    let resolved = tcx.resolved_global()?;
     
     if let Some(path) = &key.path {
         if let Some(sub) = get_by_path(&resolved, path) {

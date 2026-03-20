@@ -1,6 +1,6 @@
 use crate::dep_graph::{DepGraph, DepNode, NodeState};
 use crate::error::ConfigError;
-use crate::keys::{RawItemKey, SourceKey, SubtreeKey, TypedNodeKey};
+use crate::keys::{RawItemKey, SubtreeKey, TypedNodeKey};
 use crate::providers::CfgProviders;
 use serde_json::Value as ValueMap;
 use std::any::Any;
@@ -27,8 +27,8 @@ pub struct CfgCtxt {
     pub providers: CfgProviders,
     // Thread-local stack to track the currently executing query for automatic dependency tracking
     active_query_stack: RwLock<Vec<DepNode>>,
-    // Registry of which SourceKey maps to which RawItemKeys (in order of priority)
-    pub source_registry: RwLock<HashMap<SourceKey, Vec<RawItemKey>>>,
+    // The flat list of global sources defining the merge pipeline
+    pub global_sources: RwLock<Vec<RawItemKey>>,
     // Store for dynamic/pushed raw contents (like Nacos)
     pub raw_store: RwLock<HashMap<RawItemKey, String>>,
 }
@@ -46,7 +46,7 @@ impl CfgCtxt {
             dep_graph: RwLock::new(DepGraph::new()),
             providers,
             active_query_stack: RwLock::new(Vec::new()),
-            source_registry: RwLock::new(HashMap::new()),
+            global_sources: RwLock::new(Vec::new()),
             raw_store: RwLock::new(HashMap::new()),
         }
     }
@@ -141,19 +141,19 @@ impl CfgCtxt {
         }).map(|(v, _)| v)
     }
 
-    pub fn merged_source(&self, key: SourceKey) -> Result<Arc<ValueMap>, ConfigError> {
-        let node = DepNode::MergedSource(key.clone());
+    pub fn merged_global(&self) -> Result<Arc<ValueMap>, ConfigError> {
+        let node = DepNode::MergedGlobal;
         self.with_query(node, || {
-            let val = (self.providers.merged_source)(self, key)?;
+            let val = (self.providers.merged_global)(self)?;
             let fp = calculate_fingerprint(&val.to_string());
             Ok((val, fp))
         }).map(|(v, _)| v)
     }
 
-    pub fn resolved_source(&self, key: SourceKey) -> Result<Arc<ValueMap>, ConfigError> {
-        let node = DepNode::ResolvedSource(key.clone());
+    pub fn resolved_global(&self) -> Result<Arc<ValueMap>, ConfigError> {
+        let node = DepNode::ResolvedGlobal;
         self.with_query(node, || {
-            let val = (self.providers.resolved_source)(self, key)?;
+            let val = (self.providers.resolved_global)(self)?;
             let fp = calculate_fingerprint(&val.to_string());
             Ok((val, fp))
         }).map(|(v, _)| v)
