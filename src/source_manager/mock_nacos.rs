@@ -1,31 +1,28 @@
 use crate::error::ConfigError;
-use crate::source_manager::ConfigNodeProvider;
-use serde_json::Value as ValueMap;
+use crate::source_manager::RawProvider;
 use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub struct MockNacosProvider {
+pub struct MockNacosRawProvider {
     pub node_id: String,
     pub cache: Arc<RwLock<String>>,
     pub simulated_updates: Vec<(u64, String)>,
-    pub format: String,
 }
 
-impl MockNacosProvider {
-    pub fn new(node_id: String, initial_data: String, format: String, simulated_updates: Vec<(u64, String)>) -> Self {
+impl MockNacosRawProvider {
+    pub fn new(node_id: String, initial_data: String, simulated_updates: Vec<(u64, String)>) -> Self {
         Self {
             node_id,
             cache: Arc::new(RwLock::new(initial_data)),
             simulated_updates,
-            format,
         }
     }
 }
 
 #[async_trait]
-impl ConfigNodeProvider for MockNacosProvider {
+impl RawProvider for MockNacosRawProvider {
     fn node_id(&self) -> String {
         self.node_id.clone()
     }
@@ -37,18 +34,12 @@ impl ConfigNodeProvider for MockNacosProvider {
         Ok(hasher.finish())
     }
 
-    fn fetch_and_parse(&self) -> Result<Arc<ValueMap>, ConfigError> {
+    fn fetch(&self) -> Result<String, ConfigError> {
         let raw_text = {
             let cache = self.cache.read().unwrap();
             cache.clone()
         };
-        let parsed_value = match self.format.as_str() {
-            "json" => serde_json::from_str(&raw_text).map_err(ConfigError::Json)?,
-            "yaml" | "yml" => serde_yaml::from_str(&raw_text).map_err(ConfigError::Yaml)?,
-            "toml" => toml::from_str(&raw_text).map_err(ConfigError::Toml)?,
-            _ => ValueMap::Null,
-        };
-        Ok(Arc::new(parsed_value))
+        Ok(raw_text)
     }
 
     async fn watch(&self, on_update: Arc<dyn Fn(String) + Send + Sync>) -> Result<(), ConfigError> {

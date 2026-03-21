@@ -4,7 +4,6 @@ pub mod dep_graph;
 pub mod error;
 pub mod facade;
 pub mod keys;
-pub mod orchestrator;
 pub mod providers;
 pub mod source_manager;
 pub mod parsers;
@@ -12,9 +11,8 @@ pub mod parsers;
 pub use bootstrap::{BootstrapConfig, SourceConfig};
 pub use context::CfgCtxt;
 pub use error::ConfigError;
-pub use facade::{ConfigBind, ConfigEngine};
+pub use facade::{ConfigBind, ConfigEngine, ConfigEngineBuilder};
 pub use keys::{SubtreeKey, TypedNodeKey};
-pub use orchestrator::Bootstrapper;
 pub use providers::CfgProviders;
 pub use source_manager::ConfigNodeProvider;
 
@@ -51,16 +49,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_bootstrapper_auto_wire() {
-        // 1. Load the real Bootstrap Config from the project root
-        let config = BootstrapConfig::load_from_file("bootstrap.yaml").unwrap();
-        let bootstrapper = Bootstrapper::new(config);
+        // Just one line to load everything!
+        let engine = ConfigEngine::builder()
+            .load_from_bootstrap("bootstrap.yaml")
+            .await
+            .unwrap()
+            .build_arc()
+            .await
+            .unwrap();
 
-        // 2. Auto-wire and Build Engine using REAL connectors!
-        let engine = bootstrapper.bootstrap().await.unwrap();
-
-        //let merged = engine.tcx().merged_global().unwrap();
-        //println!("Merged global: {:?}", merged);
-        
         // 3. Load the generic Value directly to assert it works without knowing the struct
         let root_config = engine.load::<serde_json::Value>().unwrap();
         println!("Root config from ArcSwap: {:?}", serde_json::to_string(&*(root_config.load().clone())).unwrap());

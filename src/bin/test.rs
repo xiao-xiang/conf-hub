@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use confhub::{BootstrapConfig, Bootstrapper, ConfigBind};
+use confhub::{ConfigEngine, ConfigBind};
 use tracing_subscriber::fmt;
 
 
@@ -30,10 +30,15 @@ impl ConfigBind for ServerConfig {
 #[tokio::main]
 async fn main() {
     fmt::init();
-    let config = BootstrapConfig::load_from_file("bootstrap.yaml").unwrap();
-    let bootstrapper = Bootstrapper::new(config);
-
-    let engine = bootstrapper.bootstrap().await.unwrap();
+    
+    // 仅仅这一句话，全部搞定！
+    let engine = ConfigEngine::builder()
+        .load_from_bootstrap("bootstrap.yaml")
+        .await
+        .unwrap()
+        .build_arc()
+        .await
+        .unwrap();
 
     let a_config = engine.load::<AConfig>().unwrap();
     assert_eq!(a_config.load().name, "zhangsana");

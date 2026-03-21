@@ -1,16 +1,14 @@
 use crate::error::ConfigError;
-use crate::source_manager::ConfigNodeProvider;
+use crate::source_manager::RawProvider;
 use nacos_sdk::api::config::{ConfigChangeListener, ConfigService, ConfigServiceBuilder};
 use nacos_sdk::api::props::ClientProps;
-use serde_json::Value as ValueMap;
 use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-pub struct NacosProvider {
+pub struct NacosRawProvider {
     node_id: String,
-    format: String,
     data_id: String,
     group: String,
     dynamic: bool,
@@ -18,7 +16,7 @@ pub struct NacosProvider {
     cache: Arc<RwLock<String>>,
 }
 
-impl NacosProvider {
+impl NacosRawProvider {
     pub async fn new(
         server_addr: String,
         namespace: String,
@@ -27,7 +25,6 @@ impl NacosProvider {
         data_id: String,
         group: String,
         dynamic: bool,
-        format: String,
     ) -> Result<Self, ConfigError> {
         let mut props = ClientProps::new().server_addr(&server_addr).namespace(&namespace);
 
@@ -51,7 +48,6 @@ impl NacosProvider {
 
         Ok(Self {
             node_id: format!("nacos://{}/{}/{}", server_addr, group, data_id),
-            format,
             data_id,
             group,
             dynamic,
@@ -79,7 +75,7 @@ impl ConfigChangeListener for InnerListener {
 }
 
 #[async_trait]
-impl ConfigNodeProvider for NacosProvider {
+impl RawProvider for NacosRawProvider {
     fn node_id(&self) -> String {
         self.node_id.clone()
     }
@@ -91,24 +87,12 @@ impl ConfigNodeProvider for NacosProvider {
         Ok(hasher.finish())
     }
 
-    fn fetch_and_parse(&self) -> Result<Arc<ValueMap>, ConfigError> {
+    fn fetch(&self) -> Result<String, ConfigError> {
         let raw_text = {
             let cache = self.cache.read().unwrap();
             cache.clone()
         };
-
-        if raw_text.trim().is_empty() {
-            return Ok(Arc::new(ValueMap::Object(serde_json::Map::new())));
-        }
-
-        let parsed_value = match self.format.as_str() {
-            "yaml" | "yml" => serde_yaml::from_str(&raw_text).map_err(ConfigError::Yaml)?,
-            "toml" => toml::from_str(&raw_text).map_err(ConfigError::Toml)?,
-            "json" => serde_json::from_str(&raw_text).map_err(ConfigError::Json)?,
-            _ => ValueMap::Null,
-        };
-
-        Ok(Arc::new(parsed_value))
+        Ok(raw_text)
     }
 
     async fn watch(&self, on_update: Arc<dyn Fn(String) + Send + Sync>) -> Result<(), ConfigError> {

@@ -4,6 +4,19 @@ use ini::Ini;
 use java_properties::read;
 use std::collections::HashMap;
 
+pub fn get_parser_fn(format: &str) -> fn(&str) -> Result<ValueMap, ConfigError> {
+    match format {
+        "yaml" | "yml" => |text| serde_yaml::from_str(text).map_err(ConfigError::Yaml),
+        "toml" => |text| toml::from_str(text).map_err(ConfigError::Toml),
+        "json" => |text| serde_json::from_str(text).map_err(ConfigError::Json),
+        "ini" => parse_ini,
+        "properties" => parse_properties,
+        "env_kv" => |text| Ok(parse_env(text)),
+        "args_kv" => |text| Ok(parse_args(text)),
+        _ => |_| Err(ConfigError::Provider(format!("Unsupported format"))),
+    }
+}
+
 pub fn insert_nested(root: ValueMap, path: &str, val: &str) -> ValueMap {
     let parts: Vec<&str> = path.split('.').collect();
     
