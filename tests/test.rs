@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use confhub::{ConfigEngine, ConfigBind};
+use conf_hub::{ConfigEngine, ConfigBind};
 use tracing_subscriber::fmt;
 
 

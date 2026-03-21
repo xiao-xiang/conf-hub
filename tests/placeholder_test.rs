@@ -1,6 +1,6 @@
-use confhub::facade::ConfigEngineBuilder;
-use confhub::source_manager::mock_nacos::MockNacosRawProvider;
-use confhub::source_manager::ParserDecorator;
+use conf_hub::config_engine::ConfigEngineBuilder;
+use conf_hub::source_manager::mock_nacos::MockNacosRawProvider;
+use conf_hub::source_manager::ParserDecorator;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -21,7 +21,7 @@ async fn test_placeholder() {
         vec![]
     ));
 
-    let parse_fn = confhub::parsers::get_parser_fn("json");
+    let parse_fn = conf_hub::parsers::get_parser_fn("json");
     let provider = Arc::new(ParserDecorator::new(raw_provider, parse_fn));
 
     let engine = ConfigEngineBuilder::new()
