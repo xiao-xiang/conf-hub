@@ -1,10 +1,9 @@
-use crate::keys::{RawItemKey, SubtreeKey, TypedNodeKey};
+use crate::keys::{SubtreeKey, TypedNodeKey};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum DepNode {
-    RawItem(RawItemKey),
-    ParsedItem(RawItemKey),
+    SourceAST(String),
     MergedGlobal,
     ResolvedGlobal,
     Subtree(SubtreeKey),

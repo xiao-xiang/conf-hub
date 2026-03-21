@@ -1,31 +1,52 @@
 use crate::error::ConfigError;
-use crate::keys::RawItemKey;
-use crate::source_manager::SourceConnector;
+use crate::source_manager::ConfigNodeProvider;
+use crate::parsers;
+use serde_json::Value as ValueMap;
+use std::sync::Arc;
+use async_trait::async_trait;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-pub struct ArgsConnector {
-    pub key: RawItemKey,
-    pub mocked_args: Option<String>,
+pub struct ArgsProvider {
+    pub mocked_args: Option<Vec<String>>,
 }
 
-use async_trait::async_trait;
+impl ArgsProvider {
+    pub fn new(mocked_args: Option<Vec<String>>) -> Self {
+        Self { mocked_args }
+    }
+}
 
 #[async_trait]
-impl SourceConnector for ArgsConnector {
-    async fn fetch_initial(&self) -> Result<std::collections::HashMap<RawItemKey, Option<String>>, ConfigError> {
-        let mut map = std::collections::HashMap::new();
+impl ConfigNodeProvider for ArgsProvider {
+    fn node_id(&self) -> String {
+        "args://global".to_string()
+    }
+
+    fn raw_fingerprint(&self) -> Result<u64, ConfigError> {
+        let mut hasher = DefaultHasher::new();
         if let Some(ref args) = self.mocked_args {
-            map.insert(self.key.clone(), Some(args.clone()));
+            args.hash(&mut hasher);
         } else {
-            map.insert(self.key.clone(), Some("[]".to_string()));
+            for arg in std::env::args() {
+                arg.hash(&mut hasher);
+            }
         }
-        Ok(map)
+        Ok(hasher.finish())
     }
 
-    async fn watch(&self, _on_update: Box<dyn Fn(RawItemKey, String) + Send + Sync>) -> Result<(), ConfigError> {
+    fn fetch_and_parse(&self) -> Result<Arc<ValueMap>, ConfigError> {
+        let args: Vec<String> = if let Some(ref mocked) = self.mocked_args {
+            mocked.clone()
+        } else {
+            std::env::args().collect()
+        };
+        
+        let json_str = serde_json::to_string(&args).unwrap();
+        Ok(Arc::new(parsers::parse_args(&json_str)))
+    }
+
+    async fn watch(&self, _on_update: Arc<dyn Fn(String) + Send + Sync>) -> Result<(), ConfigError> {
         Ok(())
-    }
-
-    fn keys(&self) -> Vec<RawItemKey> {
-        vec![self.key.clone()]
     }
 }

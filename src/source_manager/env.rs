@@ -1,52 +1,52 @@
 use crate::error::ConfigError;
-use crate::keys::RawItemKey;
-use crate::source_manager::SourceConnector;
+use crate::source_manager::ConfigNodeProvider;
+use crate::parsers;
+use serde_json::Value as ValueMap;
+use std::sync::Arc;
+use async_trait::async_trait;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-pub struct EnvConnector {
-    pub key: RawItemKey,
-    // Provide mocked env for testing
-    pub mocked_env: Option<String>,
+pub struct EnvProvider {
+    pub prefix: String,
 }
 
-use async_trait::async_trait;
+impl EnvProvider {
+    pub fn new(prefix: String) -> Self {
+        Self { prefix }
+    }
+}
 
 #[async_trait]
-impl SourceConnector for EnvConnector {
-    async fn fetch_initial(&self) -> Result<std::collections::HashMap<RawItemKey, Option<String>>, ConfigError> {
-        let prefix = self.key.uri.trim_start_matches("env://");
-        let mut env_map = std::collections::HashMap::new();
+impl ConfigNodeProvider for EnvProvider {
+    fn node_id(&self) -> String {
+        "env://global".to_string()
+    }
 
-        if let Some(ref env) = self.mocked_env {
-            // parse mock and filter
-            if let Ok(parsed) = serde_json::from_str::<std::collections::HashMap<String, String>>(env) {
-                for (k, v) in parsed {
-                    if k.starts_with(prefix) {
-                        env_map.insert(k[prefix.len()..].to_string(), v);
-                    }
-                }
-            }
-        } else {
-            // Real implementation
-            for (k, v) in std::env::vars() {
-                if k.starts_with(prefix) {
-                    env_map.insert(k[prefix.len()..].to_string(), v);
-                }
+    fn raw_fingerprint(&self) -> Result<u64, ConfigError> {
+        let mut hasher = DefaultHasher::new();
+        for (key, val) in std::env::vars() {
+            if key.starts_with(&self.prefix) {
+                key.hash(&mut hasher);
+                val.hash(&mut hasher);
             }
         }
-        
-        let json = serde_json::to_string(&env_map).unwrap_or_else(|_| "{}".to_string());
-        
-        let mut results = std::collections::HashMap::new();
-        results.insert(self.key.clone(), Some(json));
-        Ok(results)
+        Ok(hasher.finish())
     }
 
-    async fn watch(&self, _on_update: Box<dyn Fn(RawItemKey, String) + Send + Sync>) -> Result<(), ConfigError> {
-        // Environment variables usually don't change at runtime, so no watch needed
+    fn fetch_and_parse(&self) -> Result<Arc<ValueMap>, ConfigError> {
+        let mut map = std::collections::HashMap::new();
+        for (key, val) in std::env::vars() {
+            if key.starts_with(&self.prefix) {
+                let k = key[self.prefix.len()..].to_string();
+                map.insert(k, val);
+            }
+        }
+        let json_str = serde_json::to_string(&map).unwrap();
+        Ok(Arc::new(parsers::parse_env(&json_str)))
+    }
+
+    async fn watch(&self, _on_update: Arc<dyn Fn(String) + Send + Sync>) -> Result<(), ConfigError> {
         Ok(())
-    }
-
-    fn keys(&self) -> Vec<RawItemKey> {
-        vec![self.key.clone()]
     }
 }

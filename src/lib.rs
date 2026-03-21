@@ -7,15 +7,16 @@ pub mod keys;
 pub mod orchestrator;
 pub mod providers;
 pub mod source_manager;
+pub mod parsers;
 
 pub use bootstrap::{BootstrapConfig, SourceConfig};
 pub use context::CfgCtxt;
 pub use error::ConfigError;
 pub use facade::{ConfigBind, ConfigEngine};
-pub use keys::{RawItemKey, SubtreeKey, TypedNodeKey};
+pub use keys::{SubtreeKey, TypedNodeKey};
 pub use orchestrator::Bootstrapper;
 pub use providers::CfgProviders;
-pub use source_manager::SourceConnector;
+pub use source_manager::ConfigNodeProvider;
 
 #[cfg(test)]
 mod tests {
@@ -77,3 +78,4 @@ mod tests {
         assert_eq!(server_config.load().test_test, 16); // test_test is perfectly loaded as u32
     }
 }
+

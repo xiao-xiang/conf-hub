@@ -1,7 +1,8 @@
 use crate::dep_graph::{DepGraph, DepNode, NodeState};
 use crate::error::ConfigError;
-use crate::keys::{RawItemKey, SubtreeKey, TypedNodeKey};
+use crate::keys::{SubtreeKey, TypedNodeKey};
 use crate::providers::CfgProviders;
+use crate::source_manager::ConfigNodeProvider;
 use serde_json::Value as ValueMap;
 use std::any::Any;
 use std::collections::{HashMap, hash_map::DefaultHasher};
@@ -27,27 +28,26 @@ pub struct CfgCtxt {
     pub providers: CfgProviders,
     // Thread-local stack to track the currently executing query for automatic dependency tracking
     active_query_stack: RwLock<Vec<DepNode>>,
+    
+    // The leaf node providers that fetch and parse the AST
+    pub node_providers: HashMap<String, Arc<dyn ConfigNodeProvider>>,
     // The flat list of global sources defining the merge pipeline
-    pub global_sources: RwLock<Vec<RawItemKey>>,
-    // Store for dynamic/pushed raw contents (like Nacos)
-    pub raw_store: RwLock<HashMap<RawItemKey, String>>,
-}
-
-impl Default for CfgCtxt {
-    fn default() -> Self {
-        Self::new(CfgProviders::default())
-    }
+    pub global_source_ids: Vec<String>,
 }
 
 impl CfgCtxt {
-    pub fn new(providers: CfgProviders) -> Self {
+    pub fn new(
+        providers: CfgProviders,
+        node_providers: HashMap<String, Arc<dyn ConfigNodeProvider>>,
+        global_source_ids: Vec<String>,
+    ) -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
             dep_graph: RwLock::new(DepGraph::new()),
             providers,
             active_query_stack: RwLock::new(Vec::new()),
-            global_sources: RwLock::new(Vec::new()),
-            raw_store: RwLock::new(HashMap::new()),
+            node_providers,
+            global_source_ids,
         }
     }
 
@@ -123,20 +123,13 @@ impl CfgCtxt {
 
     // --- Query Facades ---
 
-    pub fn raw_item(&self, key: RawItemKey) -> Result<Arc<String>, ConfigError> {
-        let node = DepNode::RawItem(key.clone());
+    pub fn source_ast(&self, node_id: String) -> Result<Arc<ValueMap>, ConfigError> {
+        let node = DepNode::SourceAST(node_id.clone());
         self.with_query(node, || {
-            let val = (self.providers.raw_item)(self, key)?;
-            let fp = calculate_fingerprint(&*val);
-            Ok((val, fp))
-        }).map(|(v, _)| v)
-    }
-
-    pub fn parsed_item(&self, key: RawItemKey) -> Result<Arc<ValueMap>, ConfigError> {
-        let node = DepNode::ParsedItem(key.clone());
-        self.with_query(node, || {
-            let val = (self.providers.parsed_item)(self, key)?;
-            let fp = calculate_fingerprint(&val.to_string()); // Simple hash of json string for ValueMap
+            let provider = self.node_providers.get(&node_id)
+                .ok_or_else(|| ConfigError::Provider(format!("Provider not found: {}", node_id)))?;
+            let val = (self.providers.source_ast)(self, node_id)?;
+            let fp = provider.raw_fingerprint()?;
             Ok((val, fp))
         }).map(|(v, _)| v)
     }
@@ -179,8 +172,8 @@ impl CfgCtxt {
     }
 
     // External event trigger
-    pub fn invalidate_raw_item(&self, key: RawItemKey) {
-        let node = DepNode::RawItem(key);
+    pub fn invalidate_source(&self, node_id: String) {
+        let node = DepNode::SourceAST(node_id);
         self.dep_graph.write().unwrap().mark_dirty(&node);
     }
 }

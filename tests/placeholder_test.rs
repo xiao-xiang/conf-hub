@@ -1,32 +1,28 @@
 use confhub::facade::ConfigEngineBuilder;
-use confhub::keys::RawItemKey;
+use confhub::source_manager::mock_nacos::MockNacosProvider;
+use std::sync::Arc;
 
 #[test]
 fn test_placeholder() {
-    let engine = ConfigEngineBuilder::new()
-        .with_global_sources(vec![
-            RawItemKey {
-                uri: "memory://config.json".to_string(),
-                parser_type: "json".to_string(),
-            }
-        ])
-        .with_raw_content(
-            RawItemKey {
-                uri: "memory://config.json".to_string(),
-                parser_type: "json".to_string(),
+    let provider = Arc::new(MockNacosProvider::new(
+        "memory://config.json".to_string(),
+        r#"{
+            "app": {
+                "name": "my-app",
+                "greeting": "Hello, ${app.name}!",
+                "nested": "${app.greeting} Welcome to ${server.port}"
             },
-            r#"{
-                "app": {
-                    "name": "my-app",
-                    "greeting": "Hello, ${app.name}!",
-                    "nested": "${app.greeting} Welcome to ${server.port}"
-                },
-                "server": {
-                    "port": 8080,
-                    "url": "http://localhost:${server.port}"
-                }
-            }"#
-        )
+            "server": {
+                "port": 8080,
+                "url": "http://localhost:${server.port}"
+            }
+        }"#.to_string(),
+        "json".to_string(),
+        vec![]
+    ));
+
+    let engine = ConfigEngineBuilder::new()
+        .add_provider(provider)
         .build();
 
     let root = engine.tcx().resolved_global().unwrap();

@@ -1,7 +1,8 @@
 use crate::context::CfgCtxt;
 use crate::error::ConfigError;
-use crate::keys::{SubtreeKey, TypedNodeKey, RawItemKey};
+use crate::keys::{SubtreeKey, TypedNodeKey};
 use crate::providers::CfgProviders;
+use crate::source_manager::ConfigNodeProvider;
 use arc_swap::ArcSwap;
 use serde::de::DeserializeOwned;
 use std::any::TypeId;
@@ -20,42 +21,29 @@ pub trait ConfigBind: DeserializeOwned + Send + Sync + 'static {
 
 pub struct ConfigEngineBuilder {
     providers: CfgProviders,
-    global_sources: Vec<RawItemKey>,
-    raw_store: std::collections::HashMap<RawItemKey, String>,
+    node_providers: std::collections::HashMap<String, Arc<dyn ConfigNodeProvider>>,
+    global_source_ids: Vec<String>,
 }
 
 impl ConfigEngineBuilder {
     pub fn new() -> Self {
         Self {
             providers: CfgProviders::default(),
-            global_sources: Vec::new(),
-            raw_store: std::collections::HashMap::new(),
+            node_providers: std::collections::HashMap::new(),
+            global_source_ids: Vec::new(),
         }
     }
 
-    pub fn with_global_sources(mut self, sources: Vec<RawItemKey>) -> Self {
-        self.global_sources = sources;
-        self
-    }
-
-    pub fn with_raw_content(mut self, key: RawItemKey, content: &str) -> Self {
-        self.raw_store.insert(key, content.to_string());
+    pub fn add_provider(mut self, provider: Arc<dyn ConfigNodeProvider>) -> Self {
+        let id = provider.node_id();
+        self.node_providers.insert(id.clone(), provider);
+        self.global_source_ids.push(id);
         self
     }
 
     pub fn build(self) -> ConfigEngine {
-        let tcx = Arc::new(CfgCtxt::new(self.providers));
+        let tcx = Arc::new(CfgCtxt::new(self.providers, self.node_providers, self.global_source_ids));
         
-        {
-            let mut registry = tcx.global_sources.write().unwrap();
-            *registry = self.global_sources;
-        }
-        
-        {
-            let mut store = tcx.raw_store.write().unwrap();
-            *store = self.raw_store;
-        }
-
         ConfigEngine {
             tcx,
             updaters: std::sync::RwLock::new(Vec::new()),
@@ -117,14 +105,9 @@ impl ConfigEngine {
     }
 
     /// Triggered by a background worker when e.g. Nacos updates
-    pub fn update_raw_content(&self, key: RawItemKey, new_content: String) {
-        {
-            let mut store = self.tcx.raw_store.write().unwrap();
-            store.insert(key.clone(), new_content);
-        }
-        
+    pub fn update_source(&self, node_id: String) {
         // 1. Mark the key as dirty.
-        self.tcx.invalidate_raw_item(key);
+        self.tcx.invalidate_source(node_id);
 
         // 2. Trigger reload for all registered handlers
         self.reload_all();

@@ -39,10 +39,7 @@ async fn main() {
     assert_eq!(a_config.load().name, "zhangsana");
     assert_eq!(a_config.load().age, 16);
 
-    //loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        let server_config = engine.load::<ServerConfig>().unwrap();
-        let database_url = server_config.load().database_url.clone();
-        println!("database_url: {}", database_url);
-    //}
+    let server_config = engine.load::<ServerConfig>().unwrap();
+    let database_url = server_config.load().database_url.clone();
+    println!("database_url: {}", database_url);
 }

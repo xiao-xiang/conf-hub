@@ -1,129 +1,131 @@
-use crate::bootstrap::NacosConfigItem;
 use crate::error::ConfigError;
-use crate::keys::RawItemKey;
-use crate::source_manager::SourceConnector;
+use crate::source_manager::ConfigNodeProvider;
 use nacos_sdk::api::config::{ConfigChangeListener, ConfigService, ConfigServiceBuilder};
 use nacos_sdk::api::props::ClientProps;
-use std::collections::HashMap;
-use std::sync::Arc;
+use serde_json::Value as ValueMap;
+use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
-pub struct NacosConnector {
-    pub server_addr: String,
-    pub namespace: String,
-    pub configs: Vec<NacosConfigItem>,
+pub struct NacosProvider {
+    node_id: String,
+    format: String,
+    data_id: String,
+    group: String,
+    dynamic: bool,
     config_service: ConfigService,
+    cache: Arc<RwLock<String>>,
 }
 
-impl NacosConnector {
+impl NacosProvider {
     pub async fn new(
         server_addr: String,
         namespace: String,
         username: Option<String>,
         password: Option<String>,
-        configs: Vec<NacosConfigItem>,
+        data_id: String,
+        group: String,
+        dynamic: bool,
+        format: String,
     ) -> Result<Self, ConfigError> {
         let mut props = ClientProps::new().server_addr(&server_addr).namespace(&namespace);
 
-        if let (Some(u), Some(p)) = (username.clone(), password.clone()) {
-            // Check if username/password are actually empty strings from yaml parsing
+        if let (Some(u), Some(p)) = (username, password) {
             if !u.is_empty() && !p.is_empty() {
                 props = props.auth_username(u).auth_password(p);
             }
         }
 
-        // Nacos Rust SDK auth handling logic requires auth properties correctly passed
-        // For Nacos SDK > 0.3.0, it might need to build within a block_on if we don't pass an existing runtime
-        // But since we are already in an async context, we can just await it directly!
         let config_service = ConfigServiceBuilder::new(props)
             .enable_auth_plugin_http()
             .build()
             .await
             .map_err(|e| ConfigError::Provider(format!("Failed to build Nacos ConfigService: {:?}", e)))?;
 
+        // Initial fetch
+        let initial_resp = config_service.get_config(data_id.clone(), group.clone()).await
+            .map_err(|e| ConfigError::Provider(format!("Failed to fetch Nacos config: {:?}", e)))?;
+            
+        let initial_content = initial_resp.content().to_string();
+
         Ok(Self {
-            server_addr,
-            namespace,
-            configs,
+            node_id: format!("nacos://{}/{}/{}", server_addr, group, data_id),
+            format,
+            data_id,
+            group,
+            dynamic,
             config_service,
+            cache: Arc::new(RwLock::new(initial_content)),
         })
     }
 }
 
 struct InnerListener {
-    key: RawItemKey,
-    on_update: Arc<Box<dyn Fn(RawItemKey, String) + Send + Sync>>,
+    node_id: String,
+    on_update: Arc<dyn Fn(String) + Send + Sync>,
+    cache: Arc<RwLock<String>>,
 }
 
 impl ConfigChangeListener for InnerListener {
     fn notify(&self, config_resp: nacos_sdk::api::config::ConfigResponse) {
         let content = config_resp.content().to_string();
-        (self.on_update)(self.key.clone(), content);
+        {
+            let mut cache = self.cache.write().unwrap();
+            *cache = content;
+        }
+        (self.on_update)(self.node_id.clone());
     }
 }
 
 #[async_trait]
-impl SourceConnector for NacosConnector {
-    async fn fetch_initial(&self) -> Result<HashMap<RawItemKey, Option<String>>, ConfigError> {
-        let mut results = HashMap::new();
-        
-        for item in &self.configs {
-            let key = RawItemKey::new(
-                format!("nacos://{}/{}/{}", self.server_addr, item.group, item.data_id),
-                item.file_extension.clone(),
-            );
-            
-            let resp_result = self.config_service.get_config(item.data_id.clone(), item.group.clone()).await;
-            
-            match resp_result {
-                Ok(resp) => {
-                    results.insert(key, Some(resp.content().to_string()));
-                },
-                Err(e) => {
-                    println!("Warning: Failed to fetch config {} from Nacos: {:?}", item.data_id, e);
-                    // Depending on strictness, we might want to fail the whole bootstrap or just skip it
-                    // For now, we will skip it to allow the application to start if some configs are missing or auth fails
-                    // In a production app, you might want to configure this behavior (fail-fast vs warn)
-                    results.insert(key, None);
-                }
-            }
-        }
-        
-        Ok(results)
+impl ConfigNodeProvider for NacosProvider {
+    fn node_id(&self) -> String {
+        self.node_id.clone()
     }
 
-    async fn watch(&self, on_update: Box<dyn Fn(RawItemKey, String) + Send + Sync>) -> Result<(), ConfigError> {
-        let shared_cb = Arc::new(on_update);
-        
-        for item in &self.configs {
-            if !item.dynamic {
-                continue;
-            }
-            
-            let key = RawItemKey::new(
-                format!("nacos://{}/{}/{}", self.server_addr, item.group, item.data_id),
-                item.file_extension.clone(),
-            );
-            
-            let listener = Arc::new(InnerListener {
-                key,
-                on_update: shared_cb.clone(),
-            });
-            
-            self.config_service.add_listener(item.data_id.clone(), item.group.clone(), listener)
-                .await
-                .map_err(|e| ConfigError::Provider(format!("Failed to add listener to Nacos: {:?}", e)))?;
+    fn raw_fingerprint(&self) -> Result<u64, ConfigError> {
+        let cache = self.cache.read().unwrap();
+        let mut hasher = DefaultHasher::new();
+        cache.hash(&mut hasher);
+        Ok(hasher.finish())
+    }
+
+    fn fetch_and_parse(&self) -> Result<Arc<ValueMap>, ConfigError> {
+        let raw_text = {
+            let cache = self.cache.read().unwrap();
+            cache.clone()
+        };
+
+        if raw_text.trim().is_empty() {
+            return Ok(Arc::new(ValueMap::Object(serde_json::Map::new())));
         }
+
+        let parsed_value = match self.format.as_str() {
+            "yaml" | "yml" => serde_yaml::from_str(&raw_text).map_err(ConfigError::Yaml)?,
+            "toml" => toml::from_str(&raw_text).map_err(ConfigError::Toml)?,
+            "json" => serde_json::from_str(&raw_text).map_err(ConfigError::Json)?,
+            _ => ValueMap::Null,
+        };
+
+        Ok(Arc::new(parsed_value))
+    }
+
+    async fn watch(&self, on_update: Arc<dyn Fn(String) + Send + Sync>) -> Result<(), ConfigError> {
+        if !self.dynamic {
+            return Ok(());
+        }
+
+        let listener = Arc::new(InnerListener {
+            node_id: self.node_id.clone(),
+            on_update,
+            cache: self.cache.clone(),
+        });
+        
+        self.config_service.add_listener(self.data_id.clone(), self.group.clone(), listener)
+            .await
+            .map_err(|e| ConfigError::Provider(format!("Failed to add listener to Nacos: {:?}", e)))?;
             
         Ok(())
-    }
-
-    fn keys(&self) -> Vec<RawItemKey> {
-        self.configs.iter().map(|item| {
-            RawItemKey::new(
-                format!("nacos://{}/{}/{}", self.server_addr, item.group, item.data_id),
-                item.file_extension.clone(),
-            )
-        }).collect()
     }
 }
