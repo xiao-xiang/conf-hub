@@ -5,7 +5,6 @@ use crate::providers::CfgProviders;
 use crate::source_manager::ConfigNodeProvider;
 use serde_json::Value as ValueMap;
 use std::any::Any;
-use std::cell::RefCell;
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
@@ -54,20 +53,6 @@ fn calculate_value_fingerprint(value: &ValueMap) -> Fingerprint {
     hasher.finish()
 }
 
-thread_local! {
-    static ACTIVE_QUERY_STACK: RefCell<Vec<DepNode>> = const { RefCell::new(Vec::new()) };
-}
-
-struct QueryStackGuard;
-
-impl Drop for QueryStackGuard {
-    fn drop(&mut self) {
-        ACTIVE_QUERY_STACK.with(|stack| {
-            stack.borrow_mut().pop();
-        });
-    }
-}
-
 pub struct CachedResult {
     pub value: Arc<dyn Any + Send + Sync>,
     pub fingerprint: Fingerprint,
@@ -76,6 +61,7 @@ pub struct CachedResult {
 pub struct CfgCtxt {
     cache: RwLock<HashMap<DepNode, CachedResult>>,
     dep_graph: RwLock<DepGraph>,
+    active_query_stack: RwLock<Vec<DepNode>>,
     pub providers: CfgProviders,
     pub node_providers: HashMap<String, Arc<dyn ConfigNodeProvider>>,
     pub global_source_ids: Vec<String>,
@@ -90,6 +76,7 @@ impl CfgCtxt {
         Self {
             cache: RwLock::new(HashMap::new()),
             dep_graph: RwLock::new(DepGraph::new()),
+            active_query_stack: RwLock::new(Vec::new()),
             providers,
             node_providers,
             global_source_ids,
@@ -97,19 +84,21 @@ impl CfgCtxt {
     }
 
     fn track_dependency(&self, target: &DepNode) {
-        ACTIVE_QUERY_STACK.with(|stack| {
-            if let Some(caller) = stack.borrow().last() {
-                let mut graph = self.dep_graph.write().unwrap();
-                graph.add_edge(target.clone(), caller.clone());
-            }
-        });
+        let stack = self.active_query_stack.read().unwrap();
+        if let Some(caller) = stack.last() {
+            let mut graph = self.dep_graph.write().unwrap();
+            graph.add_edge(target.clone(), caller.clone());
+        }
     }
 
-    fn push_active_query(node: DepNode) -> QueryStackGuard {
-        ACTIVE_QUERY_STACK.with(|stack| {
-            stack.borrow_mut().push(node);
-        });
-        QueryStackGuard
+    fn push_active_query(&self, node: DepNode) {
+        let mut stack = self.active_query_stack.write().unwrap();
+        stack.push(node);
+    }
+
+    fn pop_active_query(&self) {
+        let mut stack = self.active_query_stack.write().unwrap();
+        stack.pop();
     }
 
     fn with_query<T, F>(&self, node: DepNode, f: F) -> Result<(Arc<T>, Fingerprint), ConfigError>
@@ -131,9 +120,11 @@ impl CfgCtxt {
         }
 
         self.dep_graph.write().unwrap().clear_edges(&node);
-        let _guard = Self::push_active_query(node.clone());
+        self.push_active_query(node.clone());
 
         let result = f();
+        
+        self.pop_active_query();
 
         match result {
             Ok((val, fingerprint)) => {

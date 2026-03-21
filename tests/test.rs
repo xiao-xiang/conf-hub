@@ -41,6 +41,5 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_micros(500)).await;
             println!("{:#?}", a_config.load().zhangsan.name);
             println!("{:#?}", a_config.load().zhangsan.age);
-            println!("{:#?}", a_config.load().path);
         }
 }

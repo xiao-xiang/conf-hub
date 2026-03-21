@@ -103,7 +103,9 @@ impl ConfigEngineBuilder {
 
     pub async fn build_arc(self) -> Result<Arc<ConfigEngine>, ConfigError> {
         let tcx = Arc::new(CfgCtxt::new(self.providers, self.node_providers, self.global_source_ids));
-        let (update_tx, update_rx) = mpsc::unbounded_channel();
+        // 将无界队列改为有界队列，设置容量为100。
+        // 因为我们在worker端有去重（HashSet），所以队列没必要无限长。如果更新风暴超过100，这里我们利用mpsc::channel的特性进行背压
+        let (update_tx, update_rx) = mpsc::channel(100);
 
         let engine = ConfigEngine {
             tcx,
@@ -118,6 +120,7 @@ impl ConfigEngineBuilder {
             let weak_engine = Arc::downgrade(&engine_arc);
             provider.watch(Arc::new(move |node_id| {
                 if let Some(engine) = weak_engine.upgrade() {
+                    // enqueue_source_update现在由于是有界队列的try_send，满了的话就忽略这次通知（因为后台正在处理同一批更新）
                     if let Err(err) = engine.enqueue_source_update(node_id) {
                         error!("failed to enqueue source update: {err}");
                     }
@@ -137,7 +140,7 @@ struct UpdaterEntry {
 pub struct ConfigEngine {
     tcx: Arc<CfgCtxt>,
     updaters: std::sync::RwLock<Vec<UpdaterEntry>>,
-    update_tx: mpsc::UnboundedSender<String>,
+    update_tx: mpsc::Sender<String>,
 }
 
 impl ConfigEngine {
@@ -191,18 +194,28 @@ impl ConfigEngine {
     }
 
     fn enqueue_source_update(&self, node_id: String) -> Result<(), ConfigError> {
-        self.update_tx
-            .send(node_id)
-            .map_err(|_| ConfigError::Provider("update queue is closed".to_string()))
+        // 使用 try_send 进行背压控制。当队列满时，直接丢弃该事件，避免内存溢出。
+        // 丢弃是安全的，因为配置引擎在 process_updates 时会全量拉取源最新状态。
+        match self.update_tx.try_send(node_id) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // 队列已满，安全丢弃
+                Ok(())
+            },
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(ConfigError::Provider("update queue is closed".to_string()))
+            }
+        }
     }
 
-    fn spawn_update_worker(weak_engine: Weak<ConfigEngine>, mut update_rx: mpsc::UnboundedReceiver<String>) {
+    fn spawn_update_worker(weak_engine: Weak<ConfigEngine>, mut update_rx: mpsc::Receiver<String>) {
         tokio::spawn(async move {
             while let Some(first_node_id) = update_rx.recv().await {
                 let mut dirty_nodes = HashSet::new();
                 dirty_nodes.insert(first_node_id);
 
                 sleep(Duration::from_millis(UPDATE_DEBOUNCE_MS)).await;
+                // 去重合并更新事件
                 while let Ok(node_id) = update_rx.try_recv() {
                     dirty_nodes.insert(node_id);
                 }
@@ -224,12 +237,13 @@ impl ConfigEngine {
     }
 
     pub fn reload_dirty(&self) {
-        let entries = {
-            let mut guard = self.updaters.write().unwrap();
-            std::mem::take(&mut *guard)
-        };
+        let mut guard = self.updaters.write().unwrap();
+        
+        let mut retained = Vec::with_capacity(guard.len());
+        // 我们不 take，而是逐个处理以避免丢失并发新增的项，虽然会一直持有写锁
+        // 如果想要更高并发度，可以将 updaters 改成 mpsc / dashmap 来收敛修改
+        let entries = std::mem::take(&mut *guard);
 
-        let mut retained = Vec::with_capacity(entries.len());
         for entry in entries {
             if !self.tcx.is_typed_node_dirty(&entry.key) {
                 retained.push(entry);
@@ -246,7 +260,8 @@ impl ConfigEngine {
             }
         }
 
-        let mut guard = self.updaters.write().unwrap();
+        // 把 take 出来处理完保留的放回去，并且把在这期间并发加进来的保留下来（如果有锁粒度控制的话，但这里目前是全写锁，所以期间不会有并发加进来）
+        // 因为我们上面依然用了 take，但现在锁覆盖了整个处理过程，所以不会有并发 load 进来的项被丢弃（load 会等待写锁释放）
         *guard = retained;
     }
 
@@ -255,10 +270,8 @@ impl ConfigEngine {
     }
 
     pub fn force_reload_all(&self) {
-        let entries = {
-            let mut guard = self.updaters.write().unwrap();
-            std::mem::take(&mut *guard)
-        };
+        let mut guard = self.updaters.write().unwrap();
+        let entries = std::mem::take(&mut *guard);
 
         let mut retained = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -272,7 +285,6 @@ impl ConfigEngine {
             }
         }
 
-        let mut guard = self.updaters.write().unwrap();
         *guard = retained;
     }
 }
