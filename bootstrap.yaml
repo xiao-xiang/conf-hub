@@ -1,7 +1,7 @@
 
 sources:
   - type: nacos
-    server_addr: "www.soyue.top"
+    server_addr: "127.0.0.1"
     username: "nacos"
     password: "nacos"
     namespace: "conf"
