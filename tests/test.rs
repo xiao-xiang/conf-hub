@@ -1,3 +1,4 @@
+
 use serde::Deserialize;
 use conf_hub::{ConfigEngine, ConfigBind};
 use tracing_subscriber::fmt;
@@ -6,12 +7,17 @@ use tracing_subscriber::fmt;
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct AConfig {
+    zhangsan: Z,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+struct Z {
     name: String,
-    age: u32,
+    age : usize,
 }
 
 impl ConfigBind for AConfig {
-    const PATH: Option<&'static str> = Some("a");
+    const PATH: Option<&'static str> = None;
 }
 
 
@@ -28,6 +34,11 @@ async fn main() {
         .await
         .unwrap();
 
-    let a_config = engine.load::<AConfig>().unwrap();
-    println!("{:#?}", a_config.load().name);
+
+        let a_config = engine.load::<AConfig>().unwrap();
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_micros(500)).await;
+            println!("{:#?}", a_config.load().zhangsan.name);
+            println!("{:#?}", a_config.load().zhangsan.age);
+        }
 }
