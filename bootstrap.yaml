@@ -20,6 +20,4 @@ sources:
         format: "properties"
 
   - type: env
-    prefix: "APP_"
-
   - type: args

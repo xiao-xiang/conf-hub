@@ -83,7 +83,7 @@ impl ConfigEngineBuilder {
                     }
                 }
                 SourceConfig::Env { prefix } => {
-                    let provider = EnvProvider::new(prefix.clone());
+                    let provider = EnvProvider::new(prefix.clone().unwrap_or_default());
                     self = self.add_provider(Arc::new(provider));
                 }
                 SourceConfig::Args => {

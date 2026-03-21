@@ -8,6 +8,7 @@ use tracing_subscriber::fmt;
 #[derive(Debug, Deserialize, PartialEq)]
 struct AConfig {
     zhangsan: Z,
+    path : String,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -40,5 +41,6 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_micros(500)).await;
             println!("{:#?}", a_config.load().zhangsan.name);
             println!("{:#?}", a_config.load().zhangsan.age);
+            println!("{:#?}", a_config.load().path);
         }
 }

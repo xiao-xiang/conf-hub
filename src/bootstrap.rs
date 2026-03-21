@@ -24,7 +24,8 @@ pub enum SourceConfig {
     },
     #[serde(rename = "env")]
     Env {
-        prefix: String,
+        #[serde(default)]
+        prefix: Option<String>,
     },
     #[serde(rename = "args")]
     Args,
