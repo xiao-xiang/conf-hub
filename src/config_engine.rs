@@ -10,6 +10,7 @@ use crate::source_manager::file::FileRawProvider;
 use crate::source_manager::nacos::NacosRawProvider;
 use crate::source_manager::{ConfigNodeProvider, ParserDecorator};
 use arc_swap::ArcSwap;
+use crossbeam_queue::SegQueue;
 use serde::de::DeserializeOwned;
 use std::any::TypeId;
 use std::collections::HashSet;
@@ -109,7 +110,7 @@ impl ConfigEngineBuilder {
 
         let engine = ConfigEngine {
             tcx,
-            updaters: std::sync::RwLock::new(Vec::new()),
+            updaters: SegQueue::new(),
             update_tx,
         };
 
@@ -139,7 +140,7 @@ struct UpdaterEntry {
 
 pub struct ConfigEngine {
     tcx: Arc<CfgCtxt>,
-    updaters: std::sync::RwLock<Vec<UpdaterEntry>>,
+    updaters: SegQueue<UpdaterEntry>,
     update_tx: mpsc::Sender<String>,
 }
 
@@ -182,7 +183,7 @@ impl ConfigEngine {
             }
         });
 
-        self.updaters.write().unwrap().push(UpdaterEntry { key, updater });
+        self.updaters.push(UpdaterEntry { key, updater });
 
         Ok(arc_swap)
     }
@@ -237,32 +238,33 @@ impl ConfigEngine {
     }
 
     pub fn reload_dirty(&self) {
-        let mut guard = self.updaters.write().unwrap();
+        let len = self.updaters.len();
+        let mut retained = Vec::with_capacity(len);
         
-        let mut retained = Vec::with_capacity(guard.len());
-        // 我们不 take，而是逐个处理以避免丢失并发新增的项，虽然会一直持有写锁
-        // 如果想要更高并发度，可以将 updaters 改成 mpsc / dashmap 来收敛修改
-        let entries = std::mem::take(&mut *guard);
-
-        for entry in entries {
-            if !self.tcx.is_typed_node_dirty(&entry.key) {
-                retained.push(entry);
-                continue;
-            }
-
-            match (entry.updater)(&self.tcx) {
-                Ok(true) => retained.push(entry),
-                Ok(false) => {}
-                Err(err) => {
-                    error!("failed to reload typed config {}: {err}", entry.key.type_name);
+        // 由于 SegQueue 是无锁队列，我们将其全部 pop 出来处理
+        for _ in 0..len {
+            if let Some(entry) = self.updaters.pop() {
+                if !self.tcx.is_typed_node_dirty(&entry.key) {
                     retained.push(entry);
+                    continue;
+                }
+
+                match (entry.updater)(&self.tcx) {
+                    Ok(true) => retained.push(entry),
+                    Ok(false) => {}
+                    Err(err) => {
+                        error!("failed to reload typed config {}: {err}", entry.key.type_name);
+                        retained.push(entry);
+                    }
                 }
             }
         }
 
-        // 把 take 出来处理完保留的放回去，并且把在这期间并发加进来的保留下来（如果有锁粒度控制的话，但这里目前是全写锁，所以期间不会有并发加进来）
-        // 因为我们上面依然用了 take，但现在锁覆盖了整个处理过程，所以不会有并发 load 进来的项被丢弃（load 会等待写锁释放）
-        *guard = retained;
+        // 把处理完依然有效的 entry 重新 push 回队列
+        // 期间并发 load 新增的 entry 会直接在队列里，不受影响
+        for entry in retained {
+            self.updaters.push(entry);
+        }
     }
 
     pub fn reload_all(&self) {
@@ -270,21 +272,24 @@ impl ConfigEngine {
     }
 
     pub fn force_reload_all(&self) {
-        let mut guard = self.updaters.write().unwrap();
-        let entries = std::mem::take(&mut *guard);
-
-        let mut retained = Vec::with_capacity(entries.len());
-        for entry in entries {
-            match (entry.updater)(&self.tcx) {
-                Ok(true) => retained.push(entry),
-                Ok(false) => {}
-                Err(err) => {
-                    error!("failed to reload typed config {}: {err}", entry.key.type_name);
-                    retained.push(entry);
+        let len = self.updaters.len();
+        let mut retained = Vec::with_capacity(len);
+        
+        for _ in 0..len {
+            if let Some(entry) = self.updaters.pop() {
+                match (entry.updater)(&self.tcx) {
+                    Ok(true) => retained.push(entry),
+                    Ok(false) => {}
+                    Err(err) => {
+                        error!("failed to reload typed config {}: {err}", entry.key.type_name);
+                        retained.push(entry);
+                    }
                 }
             }
         }
 
-        *guard = retained;
+        for entry in retained {
+            self.updaters.push(entry);
+        }
     }
 }

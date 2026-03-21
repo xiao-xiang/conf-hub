@@ -8,6 +8,7 @@ use std::any::Any;
 use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
+use dashmap::DashMap;
 
 type Fingerprint = u64;
 
@@ -59,8 +60,8 @@ pub struct CachedResult {
 }
 
 pub struct CfgCtxt {
-    cache: RwLock<HashMap<DepNode, CachedResult>>,
-    dep_graph: RwLock<DepGraph>,
+    cache: DashMap<DepNode, CachedResult>,
+    dep_graph: DepGraph,
     active_query_stack: RwLock<Vec<DepNode>>,
     pub providers: CfgProviders,
     pub node_providers: HashMap<String, Arc<dyn ConfigNodeProvider>>,
@@ -74,8 +75,8 @@ impl CfgCtxt {
         global_source_ids: Vec<String>,
     ) -> Self {
         Self {
-            cache: RwLock::new(HashMap::new()),
-            dep_graph: RwLock::new(DepGraph::new()),
+            cache: DashMap::new(),
+            dep_graph: DepGraph::new(),
             active_query_stack: RwLock::new(Vec::new()),
             providers,
             node_providers,
@@ -86,8 +87,7 @@ impl CfgCtxt {
     fn track_dependency(&self, target: &DepNode) {
         let stack = self.active_query_stack.read().unwrap();
         if let Some(caller) = stack.last() {
-            let mut graph = self.dep_graph.write().unwrap();
-            graph.add_edge(target.clone(), caller.clone());
+            self.dep_graph.add_edge(target.clone(), caller.clone());
         }
     }
 
@@ -109,17 +109,16 @@ impl CfgCtxt {
         self.track_dependency(&node);
 
         // Check cache and state
-        let state = self.dep_graph.read().unwrap().get_state(&node);
+        let state = self.dep_graph.get_state(&node);
         if state == NodeState::Green {
-            let cache = self.cache.read().unwrap();
-            if let Some(cached) = cache.get(&node) {
+            if let Some(cached) = self.cache.get(&node) {
                 if let Ok(value) = cached.value.clone().downcast::<T>() {
                     return Ok((value, cached.fingerprint));
                 }
             }
         }
 
-        self.dep_graph.write().unwrap().clear_edges(&node);
+        self.dep_graph.clear_edges(&node);
         self.push_active_query(node.clone());
 
         let result = f();
@@ -128,7 +127,7 @@ impl CfgCtxt {
 
         match result {
             Ok((val, fingerprint)) => {
-                self.cache.write().unwrap().insert(
+                self.cache.insert(
                     node.clone(),
                     CachedResult {
                         value: val.clone() as Arc<dyn Any + Send + Sync>,
@@ -136,7 +135,7 @@ impl CfgCtxt {
                     },
                 );
 
-                self.dep_graph.write().unwrap().set_state(node, NodeState::Green);
+                self.dep_graph.set_state(node, NodeState::Green);
 
                 Ok((val, fingerprint))
             }
@@ -195,11 +194,11 @@ impl CfgCtxt {
 
     pub fn invalidate_source(&self, node_id: String) {
         let node = DepNode::SourceAST(node_id);
-        self.dep_graph.write().unwrap().mark_dirty(&node);
+        self.dep_graph.mark_dirty(&node);
     }
 
     pub fn is_typed_node_dirty(&self, key: &TypedNodeKey) -> bool {
         let node = DepNode::Typed(key.clone());
-        self.dep_graph.read().unwrap().get_state(&node) != NodeState::Green
+        self.dep_graph.get_state(&node) != NodeState::Green
     }
 }

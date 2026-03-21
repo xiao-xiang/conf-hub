@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 arc-swap = "1.8.2"
 async-trait = "0.1.89"
+crossbeam-queue = "0.3.12"
+dashmap = "6.1.0"
 java-properties = "2.0.0"
 lazy_static = "1.5.0"
 nacos-sdk = "0.6.0"
