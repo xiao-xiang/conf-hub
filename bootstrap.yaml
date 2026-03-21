@@ -1,20 +1,15 @@
 
 sources:
   - type: nacos
-    server_addr: "172.30.97.58:8848"
-    username: "develop"
-    password: "develop2024."
-    namespace: "pxb7_dev"
+    server_addr: "www.soyue.top"
+    username: "nacos"
+    password: "nacos"
+    namespace: "conf"
     configs:
-      - data_id: "promotion-c-dynamic2.yaml"
+      - data_id: "conf.properties"
         group: "DEFAULT_GROUP"
         dynamic: true
-        file_extension: "yaml"
-
-      - data_id: "promotion-c-dynamic3.yaml"
-        group: "DEFAULT_GROUP"
-        dynamic: true
-        file_extension: "yaml"
+        file_extension: "properties"
 
   - type: file
     configs:

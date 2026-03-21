@@ -1,25 +1,26 @@
+use crate::bootstrap::{BootstrapConfig, SourceConfig};
 use crate::context::CfgCtxt;
 use crate::error::ConfigError;
 use crate::keys::{SubtreeKey, TypedNodeKey};
+use crate::parsers::get_parser_fn;
 use crate::providers::CfgProviders;
-use crate::source_manager::ConfigNodeProvider;
-use crate::bootstrap::{BootstrapConfig, SourceConfig};
+use crate::source_manager::args::ArgsProvider;
+use crate::source_manager::env::EnvProvider;
 use crate::source_manager::file::FileRawProvider;
 use crate::source_manager::nacos::NacosRawProvider;
-use crate::source_manager::{ParserDecorator, RawProvider};
-use crate::source_manager::env::EnvProvider;
-use crate::source_manager::args::ArgsProvider;
-use crate::parsers::get_parser_fn;
+use crate::source_manager::{ConfigNodeProvider, ParserDecorator};
 use arc_swap::ArcSwap;
 use serde::de::DeserializeOwned;
 use std::any::TypeId;
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Weak};
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
+use tracing::error;
 
 pub trait ConfigBind: DeserializeOwned + Send + Sync + 'static {
-    // PATH is like the prefix in Spring Boot
     const PATH: Option<&'static str> = None;
 
-    // A factory method for type-erased deserialization
     fn deserialize_any(val: &serde_json::Value) -> Result<Arc<dyn std::any::Any + Send + Sync>, ConfigError> {
         let typed: Self = serde_json::from_value(val.clone()).map_err(ConfigError::Json)?;
         Ok(Arc::new(typed))
@@ -31,6 +32,8 @@ pub struct ConfigEngineBuilder {
     node_providers: std::collections::HashMap<String, Arc<dyn ConfigNodeProvider>>,
     global_source_ids: Vec<String>,
 }
+
+const UPDATE_DEBOUNCE_MS: u64 = 50;
 
 impl ConfigEngineBuilder {
     pub fn new() -> Self {
@@ -93,47 +96,32 @@ impl ConfigEngineBuilder {
     }
 
     pub async fn build(self) -> Result<ConfigEngine, ConfigError> {
-        let tcx = Arc::new(CfgCtxt::new(self.providers, self.node_providers, self.global_source_ids));
-        
-        let engine = ConfigEngine {
-            tcx,
-            updaters: std::sync::RwLock::new(Vec::new()),
-        };
-
-        let engine_arc = Arc::new(engine);
-
-        // Start watchers
-        for provider in engine_arc.tcx().node_providers.values() {
-            let engine_clone = engine_arc.clone();
-            provider.watch(Arc::new(move |node_id| {
-                engine_clone.update_source(node_id);
-            })).await?;
-        }
-
-        // To return Arc<ConfigEngine> would be better since updaters are registered as Arc, 
-        // but to keep API compatibility, we extract it.
-        // Actually `build` is returning `ConfigEngine` but we need `Arc` for watch callbacks.
-        // It's a bit tricky to return non-Arc if we used Arc inside.
-        // We will return Arc<ConfigEngine> instead of ConfigEngine.
-        // Wait, the return type of `build` was `ConfigEngine`. Let's change it to `Arc<ConfigEngine>`.
-        Ok(Arc::into_inner(engine_arc).unwrap())
+        let engine_arc = self.build_arc().await?;
+        Arc::try_unwrap(engine_arc)
+            .map_err(|_| ConfigError::Provider("ConfigEngine is shared and cannot be moved".to_string()))
     }
 
     pub async fn build_arc(self) -> Result<Arc<ConfigEngine>, ConfigError> {
         let tcx = Arc::new(CfgCtxt::new(self.providers, self.node_providers, self.global_source_ids));
-        
+        let (update_tx, update_rx) = mpsc::unbounded_channel();
+
         let engine = ConfigEngine {
             tcx,
             updaters: std::sync::RwLock::new(Vec::new()),
+            update_tx,
         };
 
         let engine_arc = Arc::new(engine);
+        ConfigEngine::spawn_update_worker(Arc::downgrade(&engine_arc), update_rx);
 
-        // Start watchers
         for provider in engine_arc.tcx().node_providers.values() {
-            let engine_clone = engine_arc.clone();
+            let weak_engine = Arc::downgrade(&engine_arc);
             provider.watch(Arc::new(move |node_id| {
-                engine_clone.update_source(node_id);
+                if let Some(engine) = weak_engine.upgrade() {
+                    if let Err(err) = engine.enqueue_source_update(node_id) {
+                        error!("failed to enqueue source update: {err}");
+                    }
+                }
             })).await?;
         }
 
@@ -141,9 +129,15 @@ impl ConfigEngineBuilder {
     }
 }
 
+struct UpdaterEntry {
+    key: TypedNodeKey,
+    updater: Box<dyn Fn(&CfgCtxt) -> Result<bool, ConfigError> + Send + Sync>,
+}
+
 pub struct ConfigEngine {
     tcx: Arc<CfgCtxt>,
-    updaters: std::sync::RwLock<Vec<Box<dyn Fn(&CfgCtxt) -> Result<(), ConfigError> + Send + Sync>>>,
+    updaters: std::sync::RwLock<Vec<UpdaterEntry>>,
+    update_tx: mpsc::UnboundedSender<String>,
 }
 
 impl ConfigEngine {
@@ -169,46 +163,116 @@ impl ConfigEngine {
             deserializer: <T as ConfigBind>::deserialize_any,
         };
 
-        // Initial load using tcx query system to leverage cache and graph!
         let initial_val: Arc<T> = self.tcx.typed_config::<T>(key.clone())?;
         let arc_swap = Arc::new(ArcSwap::new(initial_val));
 
-        // Register updater for future reloads
         let weak_swap = Arc::downgrade(&arc_swap);
         let key_clone = key.clone();
         
-        let updater = Box::new(move |tcx: &CfgCtxt| -> Result<(), ConfigError> {
+        let updater = Box::new(move |tcx: &CfgCtxt| -> Result<bool, ConfigError> {
             if let Some(swap) = weak_swap.upgrade() {
-                // Now using the proper query system to get typed config
                 let new_val = tcx.typed_config::<T>(key_clone.clone())?;
                 swap.store(new_val);
-                Ok(())
+                Ok(true)
             } else {
-                // If the arc_swap is dropped, we can ignore
-                Ok(())
+                Ok(false)
             }
         });
 
-        self.updaters.write().unwrap().push(updater);
+        self.updaters.write().unwrap().push(UpdaterEntry { key, updater });
 
         Ok(arc_swap)
     }
 
-    /// Triggered by a background worker when e.g. Nacos updates
     pub fn update_source(&self, node_id: String) {
-        // 1. Mark the key as dirty.
-        self.tcx.invalidate_source(node_id);
+        if let Err(err) = self.enqueue_source_update(node_id) {
+            error!("failed to enqueue source update: {err}");
+        }
+    }
 
-        // 2. Trigger reload for all registered handlers
-        self.reload_all();
+    fn enqueue_source_update(&self, node_id: String) -> Result<(), ConfigError> {
+        self.update_tx
+            .send(node_id)
+            .map_err(|_| ConfigError::Provider("update queue is closed".to_string()))
+    }
+
+    fn spawn_update_worker(weak_engine: Weak<ConfigEngine>, mut update_rx: mpsc::UnboundedReceiver<String>) {
+        tokio::spawn(async move {
+            while let Some(first_node_id) = update_rx.recv().await {
+                let mut dirty_nodes = HashSet::new();
+                dirty_nodes.insert(first_node_id);
+
+                sleep(Duration::from_millis(UPDATE_DEBOUNCE_MS)).await;
+                while let Ok(node_id) = update_rx.try_recv() {
+                    dirty_nodes.insert(node_id);
+                }
+
+                if let Some(engine) = weak_engine.upgrade() {
+                    engine.process_updates(dirty_nodes);
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn process_updates(&self, dirty_nodes: HashSet<String>) {
+        for node_id in dirty_nodes {
+            self.tcx.invalidate_source(node_id);
+        }
+        self.reload_dirty();
+    }
+
+    pub fn reload_dirty(&self) {
+        let entries = {
+            let mut guard = self.updaters.write().unwrap();
+            std::mem::take(&mut *guard)
+        };
+
+        let mut retained = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !self.tcx.is_typed_node_dirty(&entry.key) {
+                retained.push(entry);
+                continue;
+            }
+
+            match (entry.updater)(&self.tcx) {
+                Ok(true) => retained.push(entry),
+                Ok(false) => {}
+                Err(err) => {
+                    error!("failed to reload typed config {}: {err}", entry.key.type_name);
+                    retained.push(entry);
+                }
+            }
+        }
+
+        let mut guard = self.updaters.write().unwrap();
+        *guard = retained;
     }
 
     pub fn reload_all(&self) {
-        let updaters = self.updaters.read().unwrap();
-        for updater in updaters.iter() {
-            // If early cutoff happens, tcx.subtree will return the cached Arc<ValueMap> 
-            // very quickly without doing the work.
-            let _ = updater(&self.tcx);
+        self.force_reload_all();
+    }
+
+    pub fn force_reload_all(&self) {
+        let entries = {
+            let mut guard = self.updaters.write().unwrap();
+            std::mem::take(&mut *guard)
+        };
+
+        let mut retained = Vec::with_capacity(entries.len());
+        for entry in entries {
+            match (entry.updater)(&self.tcx) {
+                Ok(true) => retained.push(entry),
+                Ok(false) => {}
+                Err(err) => {
+                    error!("failed to reload typed config {}: {err}", entry.key.type_name);
+                    retained.push(entry);
+                }
+            }
         }
+
+        let mut guard = self.updaters.write().unwrap();
+        *guard = retained;
     }
 }
