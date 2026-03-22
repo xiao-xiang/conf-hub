@@ -10,9 +10,9 @@ use crate::source_manager::file::FileRawProvider;
 use crate::source_manager::nacos::NacosRawProvider;
 use crate::source_manager::{ConfigNodeProvider, ParserDecorator};
 use arc_swap::ArcSwap;
-use crossbeam_queue::SegQueue;
+use dashmap::DashMap;
 use serde::de::DeserializeOwned;
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use tokio::sync::mpsc;
@@ -110,7 +110,7 @@ impl ConfigEngineBuilder {
 
         let engine = ConfigEngine {
             tcx,
-            updaters: SegQueue::new(),
+            typed_cache: DashMap::new(),
             update_tx,
         };
 
@@ -133,14 +133,14 @@ impl ConfigEngineBuilder {
     }
 }
 
-struct UpdaterEntry {
-    key: TypedNodeKey,
-    updater: Box<dyn Fn(&CfgCtxt) -> Result<bool, ConfigError> + Send + Sync>,
+struct TypedCacheEntry {
+    arc_swap_any: Arc<dyn Any + Send + Sync>,
+    updater: Box<dyn Fn(&CfgCtxt, &Arc<dyn Any + Send + Sync>) -> Result<(), ConfigError> + Send + Sync>,
 }
 
 pub struct ConfigEngine {
     tcx: Arc<CfgCtxt>,
-    updaters: SegQueue<UpdaterEntry>,
+    typed_cache: DashMap<TypedNodeKey, TypedCacheEntry>,
     update_tx: mpsc::Sender<String>,
 }
 
@@ -167,23 +167,29 @@ impl ConfigEngine {
             deserializer: <T as ConfigBind>::deserialize_any,
         };
 
+        if let Some(entry) = self.typed_cache.get(&key) {
+            if let Ok(arc_swap) = entry.arc_swap_any.clone().downcast::<ArcSwap<T>>() {
+                return Ok(arc_swap);
+            }
+        }
+
         let initial_val: Arc<T> = self.tcx.typed_config::<T>(key.clone())?;
         let arc_swap = Arc::new(ArcSwap::new(initial_val));
+        let arc_swap_any = arc_swap.clone() as Arc<dyn Any + Send + Sync>;
 
-        let weak_swap = Arc::downgrade(&arc_swap);
         let key_clone = key.clone();
-        
-        let updater = Box::new(move |tcx: &CfgCtxt| -> Result<bool, ConfigError> {
-            if let Some(swap) = weak_swap.upgrade() {
+        let updater = Box::new(move |tcx: &CfgCtxt, swap_any: &Arc<dyn Any + Send + Sync>| -> Result<(), ConfigError> {
+            if let Ok(swap) = swap_any.clone().downcast::<ArcSwap<T>>() {
                 let new_val = tcx.typed_config::<T>(key_clone.clone())?;
                 swap.store(new_val);
-                Ok(true)
-            } else {
-                Ok(false)
             }
+            Ok(())
         });
 
-        self.updaters.push(UpdaterEntry { key, updater });
+        self.typed_cache.insert(key, TypedCacheEntry {
+            arc_swap_any,
+            updater,
+        });
 
         Ok(arc_swap)
     }
@@ -238,32 +244,17 @@ impl ConfigEngine {
     }
 
     pub fn reload_dirty(&self) {
-        let len = self.updaters.len();
-        let mut retained = Vec::with_capacity(len);
-        
-        // 由于 SegQueue 是无锁队列，我们将其全部 pop 出来处理
-        for _ in 0..len {
-            if let Some(entry) = self.updaters.pop() {
-                if !self.tcx.is_typed_node_dirty(&entry.key) {
-                    retained.push(entry);
-                    continue;
-                }
+        for entry in self.typed_cache.iter() {
+            let key = entry.key();
+            let cache_entry = entry.value();
 
-                match (entry.updater)(&self.tcx) {
-                    Ok(true) => retained.push(entry),
-                    Ok(false) => {}
-                    Err(err) => {
-                        error!("failed to reload typed config {}: {err}", entry.key.type_name);
-                        retained.push(entry);
-                    }
-                }
+            if !self.tcx.is_typed_node_dirty(key) {
+                continue;
             }
-        }
 
-        // 把处理完依然有效的 entry 重新 push 回队列
-        // 期间并发 load 新增的 entry 会直接在队列里，不受影响
-        for entry in retained {
-            self.updaters.push(entry);
+            if let Err(err) = (cache_entry.updater)(&self.tcx, &cache_entry.arc_swap_any) {
+                error!("failed to reload typed config {}: {err}", key.type_name);
+            }
         }
     }
 
@@ -272,24 +263,13 @@ impl ConfigEngine {
     }
 
     pub fn force_reload_all(&self) {
-        let len = self.updaters.len();
-        let mut retained = Vec::with_capacity(len);
-        
-        for _ in 0..len {
-            if let Some(entry) = self.updaters.pop() {
-                match (entry.updater)(&self.tcx) {
-                    Ok(true) => retained.push(entry),
-                    Ok(false) => {}
-                    Err(err) => {
-                        error!("failed to reload typed config {}: {err}", entry.key.type_name);
-                        retained.push(entry);
-                    }
-                }
-            }
-        }
+        for entry in self.typed_cache.iter() {
+            let key = entry.key();
+            let cache_entry = entry.value();
 
-        for entry in retained {
-            self.updaters.push(entry);
+            if let Err(err) = (cache_entry.updater)(&self.tcx, &cache_entry.arc_swap_any) {
+                error!("failed to reload typed config {}: {err}", key.type_name);
+            }
         }
     }
 }
