@@ -115,13 +115,9 @@ use conf_hub::ConfigEngine;
 #[tokio::main]
 async fn main() {
     // 1. 从 bootstrap 构建引擎（只需要一行代码！）
-    let engine = ConfigEngine::builder()
-        .load_from_bootstrap("bootstrap.yaml")
+    let engine = ConfigEngine::from_bootstrap("bootstrap.yaml")
         .await
-        .expect("Failed to load bootstrap")
-        .build_arc()
-        .await
-        .expect("Failed to build engine");
+        .expect("Failed to load bootstrap");
 
     // 2. 加载你的强类型配置。
     // 这会返回一个 Arc<ArcSwap<T>>，它的 clone 成本极低，可以方便地在不同模块间传递。

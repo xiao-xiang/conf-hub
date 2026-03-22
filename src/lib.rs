@@ -50,11 +50,7 @@ mod tests {
     #[tokio::test]
     async fn test_bootstrapper_auto_wire() {
         // Just one line to load everything!
-        let engine = ConfigEngine::builder()
-            .load_from_bootstrap("bootstrap.yaml")
-            .await
-            .unwrap()
-            .build_arc()
+        let engine = ConfigEngine::from_bootstrap("bootstrap.yaml")
             .await
             .unwrap();
 

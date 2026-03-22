@@ -115,13 +115,9 @@ use conf_hub::ConfigEngine;
 #[tokio::main]
 async fn main() {
     // 1. Build the engine from bootstrap (Only requires one line!)
-    let engine = ConfigEngine::builder()
-        .load_from_bootstrap("bootstrap.yaml")
+    let engine = ConfigEngine::from_bootstrap("bootstrap.yaml")
         .await
-        .expect("Failed to load bootstrap")
-        .build_arc()
-        .await
-        .expect("Failed to build engine");
+        .expect("Failed to load bootstrap");
 
     // 2. Load your typed configs. 
     // This returns an Arc<ArcSwap<T>>, which is cheap to clone and pass around.

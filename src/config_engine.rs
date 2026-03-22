@@ -149,6 +149,14 @@ impl ConfigEngine {
         ConfigEngineBuilder::new()
     }
 
+    pub async fn from_bootstrap(path: &str) -> Result<Arc<Self>, ConfigError> {
+        ConfigEngineBuilder::new()
+            .load_from_bootstrap(path)
+            .await?
+            .build_arc()
+            .await
+    }
+
     pub fn new() -> Self {
         panic!("ConfigEngine should be built using build().await or build_arc().await");
     }

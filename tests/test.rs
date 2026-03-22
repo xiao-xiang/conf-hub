@@ -27,16 +27,10 @@ async fn main() {
     fmt::init();
     
     // 仅仅这一句话，全部搞定！
-    let engine = ConfigEngine::builder()
-        .load_from_bootstrap("bootstrap.yaml")
-        .await
-        .unwrap()
-        .build_arc()
-        .await
-        .unwrap();
+    let engine = ConfigEngine::from_bootstrap("bootstrap.yaml").await.unwrap();
 
-
-        let a_config = engine.load::<AConfig>().unwrap();
-        println!("{:#?}", a_config.load().zhangsan.name);
-        println!("{:#?}", a_config.load().zhangsan.age);
+    let a_config = engine.load::<AConfig>().unwrap();
+    println!("{:#?}", a_config.load().zhangsan.name);
+    println!("{:#?}", a_config.load().zhangsan.age);
+    println!("{:#?}", a_config.load().path);
 }
